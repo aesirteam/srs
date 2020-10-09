@@ -8209,3 +8209,35 @@ SrsConfDirective* SrsConfig::get_stats_disk_device()
     
     return conf;
 }
+
+srs_error_t SrsConfig::reload_configmap(string path)
+{
+    srs_error_t err = srs_success;
+
+    srs_trace(" === %s -> %s", path.c_str(), config_file.c_str());
+
+    SrsFileReader fr;
+    if ((err = fr.open(path)) != srs_success) {
+        return err;
+    }
+
+    int filesize = (int) fr.filesize();
+    ssize_t nread = 0;
+
+    char buf[filesize];
+    if ((err = fr.read(buf, filesize, &nread)) != srs_success) {
+        return err;
+    }
+
+    SrsFileWriter fw;
+    if ((err = fw.open(config_file)) != srs_success) {
+        return err;
+    }
+
+    ssize_t nwrite = 0;
+    if ((err = fw.write(buf, sizeof(buf), &nwrite)) != srs_success) {
+        return err;
+    }
+
+    return err;
+}

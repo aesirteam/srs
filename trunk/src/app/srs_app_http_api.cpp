@@ -919,7 +919,23 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
         if (!allow_reload) {
             return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_DISABLED);
         }
-        
+
+        std::string scope = r->query_get("scope");
+        std::string path = r->query_get("data");
+
+        if (scope == "configmap") {
+            if (path.empty()) {
+                srs_error("scope configmap param not exists");
+                return srs_api_response_code(w, r, ERROR_SYSTEM_FILE_NOT_EXISTS);
+            }
+
+            if ((err = _srs_config->reload_configmap(path)) != srs_success) {
+                int code = srs_error_code(err);
+                srs_error_reset(err);
+                return srs_api_response_code(w, r, code);
+            }
+        }
+
         server->on_signal(SRS_SIGNAL_RELOAD);
         return srs_api_response_code(w, r, ERROR_SUCCESS);
     }
