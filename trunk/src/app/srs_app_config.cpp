@@ -8213,9 +8213,7 @@ SrsConfDirective* SrsConfig::get_stats_disk_device()
 srs_error_t SrsConfig::reload_configmap(string path)
 {
     srs_error_t err = srs_success;
-
-    srs_trace(" === %s -> %s", path.c_str(), config_file.c_str());
-
+    
     SrsFileReader fr;
     if ((err = fr.open(path)) != srs_success) {
         return err;
