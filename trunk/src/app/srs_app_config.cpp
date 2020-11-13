@@ -57,6 +57,8 @@ using namespace std;
 #include <srs_kernel_utility.hpp>
 #include <srs_rtmp_stack.hpp>
 
+#include <srs_app_http_client.hpp>
+
 using namespace _srs_internal;
 
 // @global the version to identify the core.
@@ -100,6 +102,22 @@ namespace _srs_internal
         
         pos = last = start = NULL;
         end = start;
+    }
+
+    SrsConfigBuffer::SrsConfigBuffer(string buf)
+    {
+        // read all.
+        int filesize = (int)buf.length();
+
+        if (filesize <= 0) {
+            return;
+        }
+
+        // create buffer
+        pos = last = start = new char[filesize];
+        end = start + filesize;
+
+        memcpy(start, buf.data(), filesize);
     }
     
     SrsConfigBuffer::~SrsConfigBuffer()
@@ -8210,22 +8228,62 @@ SrsConfDirective* SrsConfig::get_stats_disk_device()
     return conf;
 }
 
-srs_error_t SrsConfig::reload_configmap(string path)
+srs_error_t SrsConfig::reload_configmap(string url, string auth)
 {
     srs_error_t err = srs_success;
-    
-    SrsFileReader fr;
-    if ((err = fr.open(path)) != srs_success) {
-        return err;
+
+    std::string res;
+    SrsHttpClient hc;
+
+    SrsHttpUri uri;
+    if ((err = uri.initialize(url)) != srs_success) {
+        return srs_error_wrap(err, "http: post failed. url=%s", url.c_str());
     }
 
-    int filesize = (int) fr.filesize();
-    ssize_t nread = 0;
-
-    char buf[filesize];
-    if ((err = fr.read(buf, filesize, &nread)) != srs_success) {
-        return err;
+    if ((err = hc.initialize(uri.get_host(), uri.get_port())) != srs_success) {
+        return srs_error_wrap(err, "http: init client");
     }
+
+//    string path = uri.get_path();
+//    if (!uri.get_query().empty()) {
+//        path += "?" + uri.get_query();
+//    }
+
+    hc.set_header("Authorization", auth);
+
+    ISrsHttpMessage* msg = NULL;
+    if ((err = hc.get(uri.get_path(), "", &msg)) != srs_success) {
+        return srs_error_wrap(err, "http: client get");
+    }
+    SrsAutoFree(ISrsHttpMessage, msg);
+
+    if ((err = msg->body_read_all(res)) != srs_success) {
+        return srs_error_wrap(err, "http: body read");
+    }
+
+    if (msg->status_code() != 200) {
+        return srs_error_new(ERROR_HTTP_STATUS_INVALID, "http: status_code");
+    }
+
+    SrsConfigBuffer buffer(res);
+
+    if ((err = parse_buffer(&buffer)) != srs_success) {
+        return srs_error_wrap(err, "parse buffer");
+    }
+
+//    SrsFileReader fr;
+//    if ((err = fr.open(path)) != srs_success) {
+//        return err;
+//    }
+//
+//    int filesize = (int) fr.filesize();
+//    ssize_t nread = 0;
+//
+//    char buf[filesize];
+//    if ((err = fr.read(buf, filesize, &nread)) != srs_success) {
+//        return err;
+//    }
+//
 
     SrsFileWriter fw;
     if ((err = fw.open(config_file)) != srs_success) {
@@ -8233,7 +8291,7 @@ srs_error_t SrsConfig::reload_configmap(string path)
     }
 
     ssize_t nwrite = 0;
-    if ((err = fw.write(buf, sizeof(buf), &nwrite)) != srs_success) {
+    if ((err = fw.write((void *)res.c_str(), res.length(), &nwrite)) != srs_success) {
         return err;
     }
 
