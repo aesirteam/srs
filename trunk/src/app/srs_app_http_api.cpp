@@ -930,19 +930,21 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
                 path = "/api/v1/configmap";
             }
 
-            std::string host = "http://" + r->host() + ":8080";
-            std::string auth = "YW5vbnltb3VzOg==";      //anonymous
+            std::string o_ip = srs_get_original_ip(r);
+            std::string url;
 
-            if (!r->header()->get("Authorization").empty()) {
-                auth = r->header()->get("Authorization");
+            if (!o_ip.empty()) {
+                url = "http://" + o_ip + ":8080" + path;
+            } else {
+                url = "http://" + r->host() + ":8080" + path;
             }
 
-            std::vector<std::string> coworkers = _srs_config->get_vhost_coworkers(SRS_CONSTS_RTMP_DEFAULT_VHOST);
-            if ((int)coworkers.size() > 0) {
-                host = "http://" + coworkers[0];
+            std::string auth = r->header()->get("Authorization");
+            if (auth.empty()) {
+                auth = "YW5vbnltb3VzOg==";   //anonymous
             }
 
-            if ((err = _srs_config->reload_configmap(host + path, auth)) != srs_success) {
+            if ((err = _srs_config->reload_configmap(url, auth)) != srs_success) {
                 int code = srs_error_code(err);
                 srs_error_reset(err);
                 return srs_api_response_code(w, r, code);
