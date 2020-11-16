@@ -939,12 +939,7 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
                 url = "http://" + r->host() + ":8080" + path;
             }
 
-            std::string auth = r->header()->get("Authorization");
-            if (auth.empty()) {
-                auth = "YW5vbnltb3VzOg==";   //anonymous
-            }
-
-            if ((err = _srs_config->reload_configmap(url, auth)) != srs_success) {
+            if ((err = _srs_config->reload_configmap(url, r->header()->get("Authorization"))) != srs_success) {
                 int code = srs_error_code(err);
                 srs_error_reset(err);
                 return srs_api_response_code(w, r, code);
