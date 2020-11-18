@@ -422,7 +422,7 @@ void SrsStatistic::on_stream_close(SrsRequest* req)
     }
 }
 
-srs_error_t SrsStatistic::on_client(SrsContextId cid, SrsRequest* req, SrsConnection* conn, SrsRtmpConnType type)
+srs_error_t SrsStatistic::on_client(SrsContextId cid, SrsRequest* req, ISrsExpire* conn, SrsRtmpConnType type)
 {
     srs_error_t err = srs_success;
 
@@ -453,7 +453,7 @@ srs_error_t SrsStatistic::on_client(SrsContextId cid, SrsRequest* req, SrsConnec
     return err;
 }
 
-void SrsStatistic::on_disconnect(SrsContextId cid)
+void SrsStatistic::on_disconnect(const SrsContextId& cid)
 {
     // TODO: FIXME: We should use UUID for client ID.
     std::string id = cid.c_str();
@@ -474,10 +474,10 @@ void SrsStatistic::on_disconnect(SrsContextId cid)
     vhost->nb_clients--;
 }
 
-void SrsStatistic::kbps_add_delta(SrsConnection* conn)
+void SrsStatistic::kbps_add_delta(const SrsContextId& cid, ISrsKbpsDelta* delta)
 {
     // TODO: FIXME: Should not use context id as connection id.
-    std::string id = conn->srs_id().c_str();
+    std::string id = cid.c_str();
     if (clients.find(id) == clients.end()) {
         return;
     }
@@ -486,7 +486,7 @@ void SrsStatistic::kbps_add_delta(SrsConnection* conn)
     
     // resample the kbps to collect the delta.
     int64_t in, out;
-    conn->remark(&in, &out);
+    delta->remark(&in, &out);
     
     // add delta of connection to kbps.
     // for next sample() of server kbps can get the stat.

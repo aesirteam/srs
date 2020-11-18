@@ -30,9 +30,420 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <srs_app_rtc_source.hpp>
 #include <srs_app_rtc_conn.hpp>
 #include <srs_kernel_codec.hpp>
+#include <srs_app_conn.hpp>
+
+#include <srs_utest_service.hpp>
 
 #include <vector>
 using namespace std;
+
+class MockResource : public ISrsDisposingHandler, public ISrsResource
+{
+public:
+    SrsResourceManager* manager_;
+    MockResource(SrsResourceManager* manager) {
+        manager_ = manager;
+        if (manager_) {
+            manager_->subscribe(this);
+        }
+    }
+    virtual ~MockResource() {
+        if (manager_) {
+            manager_->unsubscribe(this);
+        }
+    }
+    virtual const SrsContextId& get_id() {
+        return _srs_context->get_id();
+    }
+    virtual std::string desc() {
+        return "";
+    }
+};
+
+class MockResourceHookOwner : public MockResource
+{
+public:
+    ISrsResource* owner_;
+    MockResourceHookOwner(SrsResourceManager* manager) : MockResource(manager) {
+        owner_ = NULL;
+    }
+    virtual ~MockResourceHookOwner() {
+    }
+    virtual void on_before_dispose(ISrsResource* c) {
+        if (c == owner_) { // Remove self if its owner is disposing.
+            manager_->remove(this);
+        }
+    }
+    virtual void on_disposing(ISrsResource* c) {
+    }
+};
+
+class MockResourceSelf : public MockResource
+{
+public:
+    bool remove_in_before_dispose;
+    bool remove_in_disposing;
+    MockResourceSelf(SrsResourceManager* manager) : MockResource(manager) {
+        remove_in_before_dispose = remove_in_disposing = false;
+    }
+    virtual ~MockResourceSelf() {
+    }
+    virtual void on_before_dispose(ISrsResource* c) {
+        if (remove_in_before_dispose) {
+            manager_->remove(this);
+        }
+    }
+    virtual void on_disposing(ISrsResource* c) {
+        if (remove_in_disposing) {
+            manager_->remove(this);
+        }
+    }
+};
+
+class MockResourceUnsubscribe : public MockResource
+{
+public:
+    int nn_before_dispose;
+    int nn_disposing;
+    bool unsubscribe_in_before_dispose;
+    bool unsubscribe_in_disposing;
+    MockResourceUnsubscribe* result;
+    MockResourceUnsubscribe(SrsResourceManager* manager) : MockResource(manager) {
+        unsubscribe_in_before_dispose = unsubscribe_in_disposing = false;
+        nn_before_dispose = nn_disposing = 0;
+        result = NULL;
+    }
+    virtual ~MockResourceUnsubscribe() {
+        if (result) { // Copy result before disposing it.
+            *result = *this;
+        }
+    }
+    virtual void on_before_dispose(ISrsResource* c) {
+        nn_before_dispose++;
+        if (unsubscribe_in_before_dispose) {
+            manager_->unsubscribe(this);
+        }
+    }
+    virtual void on_disposing(ISrsResource* c) {
+        nn_disposing++;
+        if (unsubscribe_in_disposing) {
+            manager_->unsubscribe(this);
+        }
+    }
+};
+
+VOID TEST(KernelRTCTest, ConnectionManagerTest)
+{
+    srs_error_t err = srs_success;
+
+    // When notifying, the handlers changed, disposing event may lost.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceUnsubscribe* conn0 = new MockResourceUnsubscribe(&manager);
+        conn0->unsubscribe_in_disposing = true;
+        manager.add(conn0);
+
+        MockResourceUnsubscribe* conn1 = new MockResourceUnsubscribe(&manager);
+        manager.add(conn1);
+
+        MockResourceUnsubscribe* conn2 = new MockResourceUnsubscribe(&manager);
+        manager.add(conn2);
+
+        // When removing conn0, it will unsubscribe and change the handlers,
+        // which should not cause the conn1 lost event.
+        manager.remove(conn0);
+        srs_usleep(0);
+        ASSERT_EQ(2, manager.size());
+
+        EXPECT_EQ(1, conn1->nn_before_dispose);
+        EXPECT_EQ(1, conn1->nn_disposing); // Should get event.
+
+        EXPECT_EQ(1, conn2->nn_before_dispose);
+        EXPECT_EQ(1, conn2->nn_disposing);
+    }
+
+    // When notifying, the handlers changed, before-dispose event may lost.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceUnsubscribe* conn0 = new MockResourceUnsubscribe(&manager);
+        conn0->unsubscribe_in_before_dispose = true;
+        manager.add(conn0);
+
+        MockResourceUnsubscribe* conn1 = new MockResourceUnsubscribe(&manager);
+        manager.add(conn1);
+
+        MockResourceUnsubscribe* conn2 = new MockResourceUnsubscribe(&manager);
+        manager.add(conn2);
+
+        // When removing conn0, it will unsubscribe and change the handlers,
+        // which should not cause the conn1 lost event.
+        manager.remove(conn0);
+        srs_usleep(0);
+        ASSERT_EQ(2, manager.size());
+
+        EXPECT_EQ(1, conn1->nn_before_dispose); // Should get event.
+        EXPECT_EQ(1, conn1->nn_disposing);
+
+        EXPECT_EQ(1, conn2->nn_before_dispose);
+        EXPECT_EQ(1, conn2->nn_disposing);
+    }
+
+    // Subscribe or unsubscribe for multiple times.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceUnsubscribe* resource = new MockResourceUnsubscribe(&manager);
+        resource->unsubscribe_in_before_dispose = true;
+        manager.add(resource);
+
+        MockResourceUnsubscribe result(NULL); // No manager for result.
+        resource->result = &result;
+
+        manager.remove(resource);
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+
+        EXPECT_EQ(1, result.nn_before_dispose);
+        EXPECT_EQ(0, result.nn_disposing); // No disposing event, because we unsubscribe in before-dispose.
+    }
+
+    // Count the event for disposing.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceUnsubscribe* resource = new MockResourceUnsubscribe(&manager);
+        manager.add(resource);
+
+        MockResourceUnsubscribe result(NULL); // No manager for result.
+        resource->result = &result;
+
+        manager.remove(resource);
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+
+        EXPECT_EQ(1, result.nn_before_dispose);
+        EXPECT_EQ(1, result.nn_disposing);
+    }
+
+    // When hooks disposing, remove itself again.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceSelf* resource = new MockResourceSelf(&manager);
+        resource->remove_in_disposing = true;
+        manager.add(resource);
+        EXPECT_EQ(1, manager.size());
+
+        manager.remove(resource);
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+    }
+
+    // When hooks before-dispose, remove itself again.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceSelf* resource = new MockResourceSelf(&manager);
+        resource->remove_in_before_dispose = true;
+        manager.add(resource);
+        EXPECT_EQ(1, manager.size());
+
+        manager.remove(resource);
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+    }
+
+    // Cover all normal scenarios.
+    if (true) {
+        SrsResourceManager manager("mgr", true);
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        // Resource without id or name.
+        manager.add_with_id("100", new MockSrsConnection());
+        manager.add_with_id("101", new MockSrsConnection());
+        manager.add_with_name("srs", new MockSrsConnection());
+        manager.add_with_name("av", new MockSrsConnection());
+        ASSERT_EQ(4, manager.size());
+
+        manager.remove(manager.at(3));
+        manager.remove(manager.at(2));
+        manager.remove(manager.at(1));
+        manager.remove(manager.at(0));
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+    }
+
+    // Callback: Remove worker when its master is disposing.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockResourceHookOwner* master = new MockResourceHookOwner(&manager);
+        manager.add(master);
+        EXPECT_EQ(1, manager.size());
+
+        MockResourceHookOwner* worker = new MockResourceHookOwner(&manager);
+        worker->owner_ = master; // When disposing master, worker will hook the event and remove itself.
+        manager.add(worker);
+        EXPECT_EQ(2, manager.size());
+
+        manager.remove(master);
+        srs_usleep(0); // Trigger the disposing.
+
+        // Both master and worker should be disposed.
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+    }
+
+    // Normal scenario, free object by manager.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        MockSrsConnection* conn = new MockSrsConnection();
+        manager.add(conn);
+        EXPECT_EQ(1, manager.size()); EXPECT_FALSE(manager.empty());
+
+        manager.remove(conn);
+        srs_usleep(0); // Switch context for manager to dispose connections.
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+    }
+
+    // Resource with id or name.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        // Resource without id or name.
+        MockSrsConnection* conn = new MockSrsConnection();
+        manager.add(conn);
+        ASSERT_EQ(1, manager.size());
+        EXPECT_TRUE(manager.at(0));
+        EXPECT_TRUE(!manager.at(1));
+        EXPECT_TRUE(!manager.find_by_id("100"));
+        EXPECT_TRUE(!manager.find_by_name("srs"));
+
+        manager.remove(conn);
+        srs_usleep(0);
+        ASSERT_EQ(0, manager.size());
+
+        // Resource with id.
+        if (true) {
+            MockSrsConnection* id = new MockSrsConnection();
+            manager.add_with_id("100", id);
+            EXPECT_EQ(1, manager.size());
+            EXPECT_TRUE(manager.find_by_id("100"));
+            EXPECT_TRUE(!manager.find_by_id("101"));
+            EXPECT_TRUE(!manager.find_by_name("100"));
+
+            manager.remove(id);
+            srs_usleep(0);
+            ASSERT_EQ(0, manager.size());
+        }
+
+        // Resource with name.
+        if (true) {
+            MockSrsConnection* name = new MockSrsConnection();
+            manager.add_with_name("srs", name);
+            EXPECT_EQ(1, manager.size());
+            EXPECT_TRUE(manager.find_by_name("srs"));
+            EXPECT_TRUE(!manager.find_by_name("srs0"));
+            EXPECT_TRUE(!manager.find_by_id("srs"));
+
+            manager.remove(name);
+            srs_usleep(0);
+            ASSERT_EQ(0, manager.size());
+        }
+
+        // Resource with id and name.
+        if (true) {
+            MockSrsConnection* id_name = new MockSrsConnection();
+            manager.add_with_id("100", id_name);
+            manager.add_with_id("200", id_name);
+            manager.add_with_name("srs", id_name);
+            manager.add_with_name("av", id_name);
+            EXPECT_EQ(1, manager.size());
+            EXPECT_TRUE(manager.find_by_name("srs"));
+            EXPECT_TRUE(manager.find_by_name("av"));
+            EXPECT_TRUE(manager.find_by_id("100"));
+            EXPECT_TRUE(manager.find_by_id("200"));
+            EXPECT_TRUE(!manager.find_by_name("srs0"));
+            EXPECT_TRUE(!manager.find_by_id("101"));
+
+            manager.remove(id_name);
+            srs_usleep(0);
+            ASSERT_EQ(0, manager.size());
+        }
+
+        // Resource with same id or name.
+        if (true) {
+            MockSrsConnection* conn0 = new MockSrsConnection();
+            MockSrsConnection* conn1 = new MockSrsConnection();
+            manager.add_with_id("100", conn0);
+            manager.add_with_id("100", conn1);
+
+            EXPECT_TRUE(conn0 != manager.find_by_id("100"));
+            EXPECT_TRUE(conn1 == manager.find_by_id("100"));
+
+            manager.remove(conn0);
+            srs_usleep(0);
+            ASSERT_EQ(1, manager.size());
+
+            manager.remove(conn1);
+            srs_usleep(0);
+            ASSERT_EQ(0, manager.size());
+        }
+    }
+
+    // Coroutine switch context, signal is lost.
+    if (true) {
+        SrsResourceManager manager("mgr");
+        HELPER_EXPECT_SUCCESS(manager.start());
+        EXPECT_EQ(0, manager.size()); EXPECT_TRUE(manager.empty());
+
+        if (true) { // First connection, which will switch context when deleting.
+            MockSrsConnection* conn = new MockSrsConnection();
+            conn->do_switch = true;
+            manager.add(conn);
+            EXPECT_EQ(1, manager.size()); EXPECT_EQ(0, manager.zombies_.size());
+
+            manager.remove(conn); // Remove conn to zombies.
+            EXPECT_EQ(1, manager.size()); EXPECT_EQ(1, manager.zombies_.size());
+
+            srs_usleep(0); // Switch to manager coroutine to try to free zombies.
+            EXPECT_EQ(0, manager.size()); EXPECT_EQ(0, manager.zombies_.size());
+        }
+
+        if (true) { // Now the previous conn switch back to here, and lost the signal.
+            MockSrsConnection* conn = new MockSrsConnection();
+            manager.add(conn);
+            EXPECT_EQ(1, manager.size()); EXPECT_EQ(0, manager.zombies_.size());
+
+            manager.remove(conn); // Remove conn to zombies, signal is lost.
+            EXPECT_EQ(1, manager.size()); EXPECT_EQ(1, manager.zombies_.size());
+
+            srs_usleep(0); // Switch to manager, but no signal is triggered before, so conn will be freed by loop.
+            EXPECT_EQ(0, manager.size()); EXPECT_EQ(0, manager.zombies_.size());
+        }
+    }
+}
 
 VOID TEST(KernelRTCTest, StringDumpHexTest)
 {
@@ -276,6 +687,7 @@ public:
     virtual srs_error_t on_dtls_handshake_done();
     virtual srs_error_t on_dtls_application_data(const char* data, const int len);
     virtual srs_error_t write_dtls_data(void* data, int size);
+    virtual srs_error_t on_dtls_alert(std::string type, std::string desc);
     virtual srs_error_t cycle();
 };
 
@@ -369,6 +781,11 @@ srs_error_t MockDtlsCallback::write_dtls_data(void* data, int size)
     return srs_success;
 }
 
+srs_error_t MockDtlsCallback::on_dtls_alert(std::string type, std::string desc)
+{
+    return srs_success;
+}
+
 srs_error_t MockDtlsCallback::cycle()
 {
     srs_error_t err = srs_success;
@@ -426,28 +843,6 @@ public:
     }
 };
 
-struct DTLSServerFlowCase
-{
-    int id;
-
-    string ClientVersion;
-    string ServerVersion;
-
-    bool ClientDone;
-    bool ServerDone;
-
-    bool ClientError;
-    bool ServerError;
-};
-
-std::ostream& operator<< (std::ostream& stream, const DTLSServerFlowCase& c)
-{
-    stream << "Case #" << c.id
-        << ", client(" << c.ClientVersion << ",done=" << c.ClientDone << ",err=" << c.ClientError << ")"
-        << ", server(" << c.ServerVersion << ",done=" << c.ServerDone << ",err=" << c.ServerError << ")";
-    return stream;
-}
-
 VOID TEST(KernelRTCTest, DTLSARQLimitTest)
 {
     srs_error_t err = srs_success;
@@ -461,10 +856,10 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
-        // Lost 10 packets, total packets should be 8(max to 8).
+        // Lost 10 packets, total packets should be 9(max to 9).
         // Note that only one server hello.
         cio.nn_client_hello_lost = 10;
 
@@ -477,7 +872,7 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         EXPECT_FALSE(cio.done);
         EXPECT_FALSE(sio.done);
 
-        EXPECT_EQ(8, cio.nn_client_hello);
+        EXPECT_EQ(9, cio.nn_client_hello);
         EXPECT_EQ(0, sio.nn_server_hello);
         EXPECT_EQ(0, cio.nn_certificate);
         EXPECT_EQ(0, sio.nn_new_session);
@@ -493,10 +888,10 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
-        // Lost 10 packets, total packets should be 8(max to 8).
+        // Lost 10 packets, total packets should be 9(max to 9).
         // Note that only one server NewSessionTicket.
         cio.nn_certificate_lost = 10;
 
@@ -511,7 +906,7 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
 
         EXPECT_EQ(1, cio.nn_client_hello);
         EXPECT_EQ(1, sio.nn_server_hello);
-        EXPECT_EQ(8, cio.nn_certificate);
+        EXPECT_EQ(9, cio.nn_certificate);
         EXPECT_EQ(0, sio.nn_new_session);
         EXPECT_EQ(0, sio.nn_change_cipher);
     }
@@ -525,10 +920,10 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
-        // Lost 10 packets, total packets should be 8(max to 8).
+        // Lost 10 packets, total packets should be 9(max to 9).
         sio.nn_server_hello_lost = 10;
 
         HELPER_EXPECT_SUCCESS(client.start_active_handshake());
@@ -540,8 +935,8 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         EXPECT_FALSE(cio.done);
         EXPECT_FALSE(sio.done);
 
-        EXPECT_EQ(8, cio.nn_client_hello);
-        EXPECT_EQ(8, sio.nn_server_hello);
+        EXPECT_EQ(9, cio.nn_client_hello);
+        EXPECT_EQ(9, sio.nn_server_hello);
         EXPECT_EQ(0, cio.nn_certificate);
         EXPECT_EQ(0, sio.nn_new_session);
         EXPECT_EQ(0, sio.nn_change_cipher);
@@ -556,10 +951,10 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
-        // Lost 10 packets, total packets should be 8(max to 8).
+        // Lost 10 packets, total packets should be 9(max to 9).
         sio.nn_new_session_lost = 10;
 
         HELPER_EXPECT_SUCCESS(client.start_active_handshake());
@@ -574,8 +969,8 @@ VOID TEST(KernelRTCTest, DTLSARQLimitTest)
 
         EXPECT_EQ(1, cio.nn_client_hello);
         EXPECT_EQ(1, sio.nn_server_hello);
-        EXPECT_EQ(8, cio.nn_certificate);
-        EXPECT_EQ(8, sio.nn_new_session);
+        EXPECT_EQ(9, cio.nn_certificate);
+        EXPECT_EQ(9, sio.nn_new_session);
         EXPECT_EQ(0, sio.nn_change_cipher);
     }
 }
@@ -617,8 +1012,8 @@ VOID TEST(KernelRTCTest, DTLSClientARQTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
         // Lost 2 packets, total packets should be 3.
         // Note that only one server hello.
@@ -649,8 +1044,8 @@ VOID TEST(KernelRTCTest, DTLSClientARQTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
         // Lost 2 packets, total packets should be 3.
         // Note that only one server NewSessionTicket.
@@ -710,8 +1105,8 @@ VOID TEST(KernelRTCTest, DTLSServerARQTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
         // Lost 2 packets, total packets should be 3.
         sio.nn_server_hello_lost = 2;
@@ -741,8 +1136,8 @@ VOID TEST(KernelRTCTest, DTLSServerARQTest)
         HELPER_EXPECT_SUCCESS(server.initialize("passive", "dtls1.0"));
 
         // Use very short interval for utest.
-        dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_first = 1 * SRS_UTIME_MILLISECONDS;
         dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_interval = 1 * SRS_UTIME_MILLISECONDS;
+        HELPER_ARRAY_INIT(dynamic_cast<SrsDtlsClientImpl*>(client.impl)->arq_to_ratios, 8, 1);
 
         // Lost 2 packets, total packets should be 3.
         sio.nn_new_session_lost = 2;
@@ -764,11 +1159,33 @@ VOID TEST(KernelRTCTest, DTLSServerARQTest)
     }
 }
 
+struct DTLSFlowCase
+{
+    int id;
+
+    string ClientVersion;
+    string ServerVersion;
+
+    bool ClientDone;
+    bool ServerDone;
+
+    bool ClientError;
+    bool ServerError;
+};
+
+std::ostream& operator<< (std::ostream& stream, const DTLSFlowCase& c)
+{
+    stream << "Case #" << c.id
+        << ", client(" << c.ClientVersion << ",done=" << c.ClientDone << ",err=" << c.ClientError << ")"
+        << ", server(" << c.ServerVersion << ",done=" << c.ServerDone << ",err=" << c.ServerError << ")";
+    return stream;
+}
+
 VOID TEST(KernelRTCTest, DTLSClientFlowTest)
 {
     srs_error_t err = srs_success;
 
-    DTLSServerFlowCase cases[] = {
+    DTLSFlowCase cases[] = {
         // OK, Client, Server: DTLS v1.0
         {0, "dtls1.0", "dtls1.0", true, true, false, false},
         // OK, Client, Server: DTLS v1.2
@@ -787,8 +1204,8 @@ VOID TEST(KernelRTCTest, DTLSClientFlowTest)
         {7, "dtls1.2", "dtls1.0", false, false, true, false},
     };
 
-    for (int i = 0; i < (int)(sizeof(cases) / sizeof(DTLSServerFlowCase)); i++) {
-        DTLSServerFlowCase c = cases[i];
+    for (int i = 0; i < (int)(sizeof(cases) / sizeof(DTLSFlowCase)); i++) {
+        DTLSFlowCase c = cases[i];
 
         MockDtlsCallback cio; SrsDtls client(&cio);
         MockDtlsCallback sio; MockDtls server(&sio);
@@ -812,7 +1229,7 @@ VOID TEST(KernelRTCTest, DTLSServerFlowTest)
 {
     srs_error_t err = srs_success;
 
-    DTLSServerFlowCase cases[] = {
+    DTLSFlowCase cases[] = {
         // OK, Client, Server: DTLS v1.0
         {0, "dtls1.0", "dtls1.0", true, true, false, false},
         // OK, Client, Server: DTLS v1.2
@@ -831,8 +1248,8 @@ VOID TEST(KernelRTCTest, DTLSServerFlowTest)
         {7, "dtls1.2", "dtls1.0", false, false, true, false},
     };
 
-    for (int i = 0; i < (int)(sizeof(cases) / sizeof(DTLSServerFlowCase)); i++) {
-        DTLSServerFlowCase c = cases[i];
+    for (int i = 0; i < (int)(sizeof(cases) / sizeof(DTLSFlowCase)); i++) {
+        DTLSFlowCase c = cases[i];
 
         MockDtlsCallback cio; MockDtls client(&cio);
         MockDtlsCallback sio; SrsDtls server(&sio);

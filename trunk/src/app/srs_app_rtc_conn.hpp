@@ -38,6 +38,8 @@
 #include <srs_app_rtc_queue.hpp>
 #include <srs_app_rtc_source.hpp>
 #include <srs_app_rtc_dtls.hpp>
+#include <srs_service_conn.hpp>
+#include <srs_app_conn.hpp>
 
 #include <string>
 #include <map>
@@ -93,6 +95,7 @@ public:
     virtual srs_error_t initialize(SrsSessionConfig* cfg) = 0;
     virtual srs_error_t start_active_handshake() = 0;
     virtual srs_error_t on_dtls(char* data, int nb_data) = 0;
+    virtual srs_error_t on_dtls_alert(std::string type, std::string desc) = 0;
 public:
     virtual srs_error_t protect_rtp(const char* plaintext, char* cipher, int& nb_cipher) = 0;
     virtual srs_error_t protect_rtcp(const char* plaintext, char* cipher, int& nb_cipher) = 0;
@@ -117,6 +120,7 @@ public:
     // When play role of dtls client, it send handshake. 
     srs_error_t start_active_handshake();
     srs_error_t on_dtls(char* data, int nb_data);
+    srs_error_t on_dtls_alert(std::string type, std::string desc);
 public:
     // Encrypt the input plaintext to output cipher with nb_cipher bytes.
     // @remark Note that the nb_cipher is the size of input plaintext, and 
@@ -164,6 +168,7 @@ public:
     virtual srs_error_t initialize(SrsSessionConfig* cfg);
     virtual srs_error_t start_active_handshake();
     virtual srs_error_t on_dtls(char* data, int nb_data);
+    virtual srs_error_t on_dtls_alert(std::string type, std::string desc);
     virtual srs_error_t on_dtls_handshake_done();
     virtual srs_error_t on_dtls_application_data(const char* data, const int len);
     virtual srs_error_t write_dtls_data(void* data, int size);
@@ -173,6 +178,37 @@ public:
     virtual srs_error_t protect_rtp2(void* rtp_hdr, int* len_ptr);
     virtual srs_error_t unprotect_rtp(const char* cipher, char* plaintext, int& nb_plaintext);
     virtual srs_error_t unprotect_rtcp(const char* cipher, char* plaintext, int& nb_plaintext);
+};
+
+// The handler for PLI worker coroutine.
+class ISrsRtcPLIWorkerHandler
+{
+public:
+    ISrsRtcPLIWorkerHandler();
+    virtual ~ISrsRtcPLIWorkerHandler();
+public:
+    virtual srs_error_t do_request_keyframe(uint32_t ssrc, SrsContextId cid) = 0;
+};
+
+// A worker coroutine to request the PLI.
+class SrsRtcPLIWorker : virtual public ISrsCoroutineHandler
+{
+private:
+    SrsCoroutine* trd_;
+    srs_cond_t wait_;
+    ISrsRtcPLIWorkerHandler* handler_;
+private:
+    // Key is SSRC, value is the CID of subscriber which requests PLI.
+    std::map<uint32_t, SrsContextId> plis_;
+public:
+    SrsRtcPLIWorker(ISrsRtcPLIWorkerHandler* h);
+    virtual ~SrsRtcPLIWorker();
+public:
+    virtual srs_error_t start();
+    virtual void request_keyframe(uint32_t ssrc, SrsContextId cid);
+// interface ISrsCoroutineHandler
+public:
+    virtual srs_error_t cycle();
 };
 
 // A group of RTP packets for outgoing(send to players).
@@ -208,12 +244,14 @@ public:
 };
 
 // A RTC play stream, client pull and play stream from SRS.
-class SrsRtcPlayStream : virtual public ISrsCoroutineHandler, virtual public ISrsReloadHandler, virtual public ISrsHourGlass
+class SrsRtcPlayStream : virtual public ISrsCoroutineHandler, virtual public ISrsReloadHandler
+    , virtual public ISrsHourGlass, virtual public ISrsRtcPLIWorkerHandler
 {
 private:
     SrsContextId cid_;
     SrsCoroutine* trd;
     SrsRtcConnection* session_;
+    SrsRtcPLIWorker* pli_worker_;
 private:
     SrsRequest* req_;
     SrsRtcStream* source_;
@@ -266,15 +304,20 @@ private:
     srs_error_t on_rtcp_ps_feedback(SrsRtcpPsfbCommon* rtcp);
     srs_error_t on_rtcp_rr(SrsRtcpRR* rtcp);
     uint32_t get_video_publish_ssrc(uint32_t play_ssrc);
+// inteface ISrsRtcPLIWorkerHandler
+public:
+    virtual srs_error_t do_request_keyframe(uint32_t ssrc, SrsContextId cid);
 };
 
 // A RTC publish stream, client push and publish stream to SRS.
-class SrsRtcPublishStream : virtual public ISrsHourGlass, virtual public ISrsRtpPacketDecodeHandler, virtual public ISrsRtcPublishStream
+class SrsRtcPublishStream : virtual public ISrsHourGlass, virtual public ISrsRtpPacketDecodeHandler
+    , virtual public ISrsRtcPublishStream, virtual public ISrsRtcPLIWorkerHandler
 {
 private:
     SrsContextId cid_;
     SrsHourGlass* timer_;
     uint64_t nn_audio_frames;
+    SrsRtcPLIWorker* pli_worker_;
 private:
     SrsRtcConnection* session_;
     uint16_t pt_to_drop_;
@@ -314,6 +357,7 @@ public:
     srs_error_t on_rtp(char* buf, int nb_buf);
 private:
     srs_error_t do_on_rtp(char* plaintext, int nb_plaintext);
+    srs_error_t check_send_nacks();
 public:
     virtual void on_before_decode_payload(SrsRtpPacket2* pkt, SrsBuffer* buf, ISrsRtpPayloader** ppayload);
 private:
@@ -325,7 +369,7 @@ private:
     srs_error_t on_rtcp_xr(SrsRtcpXr* rtcp);
 public:
     void request_keyframe(uint32_t ssrc);
-    void on_consumers_finished();
+    virtual srs_error_t do_request_keyframe(uint32_t ssrc, SrsContextId cid);
 // interface ISrsHourGlass
 public:
     virtual srs_error_t notify(int type, srs_utime_t interval, srs_utime_t tick);
@@ -367,12 +411,11 @@ public:
     virtual ~ISrsRtcConnectionHijacker();
 public:
     virtual srs_error_t on_dtls_done() = 0;
-    // Notify when all consumers of publisher(specified by url) is finished.
-    virtual void on_consumers_finished(std::string url) = 0;
 };
 
 // A RTC Peer Connection, SDP level object.
-class SrsRtcConnection : virtual public ISrsHourGlass
+class SrsRtcConnection : virtual public ISrsHourGlass, virtual public ISrsResource
+    , virtual public ISrsDisposingHandler
 {
     friend class SrsSecurityTransport;
     friend class SrsRtcPlayStream;
@@ -403,8 +446,10 @@ private:
     // The address list, client may use multiple addresses.
     std::map<std::string, SrsUdpMuxSocket*> peer_addresses_;
 private:
+    // TODO: FIXME: Rename it.
     // The timeout of session, keep alive by STUN ping pong.
     srs_utime_t session_timeout;
+    // TODO: FIXME: Rename it.
     srs_utime_t last_stun_time;
 private:
     // For each RTC session, we use a specified cid for debugging logs.
@@ -425,6 +470,10 @@ private:
 public:
     SrsRtcConnection(SrsRtcServer* s, const SrsContextId& cid);
     virtual ~SrsRtcConnection();
+// interface ISrsDisposingHandler
+public:
+    virtual void on_before_dispose(ISrsResource* c);
+    virtual void on_disposing(ISrsResource* c);
 public:
     // TODO: FIXME: save only connection info.
     SrsSdp* get_local_sdp();
@@ -438,6 +487,10 @@ public:
     std::string username();
     // Get all addresses client used.
     std::vector<SrsUdpMuxSocket*> peer_addresses();
+// Interface ISrsResource.
+public:
+    virtual const SrsContextId& get_id();
+    virtual std::string desc();
 public:
     void switch_to_context();
     const SrsContextId& context_id();
@@ -460,13 +513,14 @@ public:
     srs_error_t on_rtcp_feedback_twcc(char* buf, int nb_buf);
     srs_error_t on_rtcp_feedback_remb(SrsRtcpPsfbCommon *rtcp);
 public:
-    void on_consumers_finished(std::string url);
     void set_hijacker(ISrsRtcConnectionHijacker* h);
 public:
     srs_error_t on_connection_established();
+    srs_error_t on_dtls_alert(std::string type, std::string desc);
     srs_error_t start_play(std::string stream_uri);
     srs_error_t start_publish(std::string stream_uri);
-    bool is_stun_timeout();
+    bool is_alive();
+    void alive();
     void update_sendonly_socket(SrsUdpMuxSocket* skt);
 // interface ISrsHourGlass
 public:
@@ -474,7 +528,7 @@ public:
 public:
     // send rtcp
     srs_error_t send_rtcp(char *data, int nb_data);
-    void check_send_nacks(SrsRtpNackForReceiver* nack, uint32_t ssrc, uint32_t& sent_nacks);
+    void check_send_nacks(SrsRtpNackForReceiver* nack, uint32_t ssrc, uint32_t& sent_nacks, uint32_t& timeout_nacks);
     srs_error_t send_rtcp_rr(uint32_t ssrc, SrsRtpRingBuffer* rtp_queue, const uint64_t& last_send_systime, const SrsNtp& last_send_ntp);
     srs_error_t send_rtcp_xr_rrtr(uint32_t ssrc);
     srs_error_t send_rtcp_fb_pli(uint32_t ssrc, const SrsContextId& cid_of_subscriber);
