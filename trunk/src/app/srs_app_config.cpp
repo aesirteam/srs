@@ -59,7 +59,7 @@ using namespace std;
 
 #include <srs_app_http_client.hpp>
 
-using namespace _srs_internal;
+using namespace srs_internal;
 
 // @global the version to identify the core.
 const char* _srs_version = "XCORE-" RTMP_SIG_SRS_SERVER;
@@ -8409,7 +8409,7 @@ srs_error_t SrsConfig::reload_configmap(string url, string auth)
         return srs_error_wrap(err, "http: post failed. url=%s", url.c_str());
     }
 
-    if ((err = hc.initialize(uri.get_host(), uri.get_port())) != srs_success) {
+    if ((err = hc.initialize(uri.get_schema(), uri.get_host(), uri.get_port())) != srs_success) {
         return srs_error_wrap(err, "http: init client");
     }
 
