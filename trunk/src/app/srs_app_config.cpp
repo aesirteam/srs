@@ -57,13 +57,9 @@ using namespace std;
 #include <srs_kernel_utility.hpp>
 #include <srs_rtmp_stack.hpp>
 
-<<<<<<< HEAD
 #include <srs_app_http_client.hpp>
 
 using namespace _srs_internal;
-=======
-using namespace srs_internal;
->>>>>>> upstream/develop
 
 // @global the version to identify the core.
 const char* _srs_version = "XCORE-" RTMP_SIG_SRS_SERVER;
